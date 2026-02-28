@@ -58,6 +58,29 @@ git pull
 docker compose down && docker compose up -d --build
 ```
 
+### 🔄 上游仓库同步工具
+
+如果你 fork 了本项目，可以使用内置的同步脚本来追踪上游更新：
+
+```bash
+# 首次配置：添加上游仓库
+git remote add upstream https://github.com/waoowaooAI/waoowaoo.git
+
+# 仅检查上游是否有更新（只看不动）
+./scripts/upstream-sync.sh --check
+
+# 交互式同步（每步确认：拉取 → 合并 → 构建测试 → 推送）
+./scripts/upstream-sync.sh
+
+# 自动同步（无冲突时自动完成全部流程）
+./scripts/upstream-sync.sh --auto
+
+# 模拟同步（合并但不推送，用于预览效果）
+./scripts/upstream-sync.sh --dry-run
+```
+
+> 同步日志保存在 `logs/upstream-sync.log`。可配合 crontab 定时执行 `--check` 模式自动监测更新。
+
 ---
 
 ## 🚀 Quick Start
@@ -86,6 +109,29 @@ Visit [http://localhost:13000](http://localhost:13000) to get started!
 git pull
 docker compose down && docker compose up -d --build
 ```
+
+### 🔄 Upstream Sync Tool
+
+If you forked this project, use the built-in sync script to track upstream updates:
+
+```bash
+# First-time setup: add upstream remote
+git remote add upstream https://github.com/waoowaooAI/waoowaoo.git
+
+# Check for upstream updates (read-only)
+./scripts/upstream-sync.sh --check
+
+# Interactive sync (confirm each step: fetch → merge → build test → push)
+./scripts/upstream-sync.sh
+
+# Auto sync (fully automatic when no conflicts)
+./scripts/upstream-sync.sh --auto
+
+# Dry run (merge locally but don't push)
+./scripts/upstream-sync.sh --dry-run
+```
+
+> Logs are saved to `logs/upstream-sync.log`. Optionally set up a crontab with `--check` mode for automated monitoring.
 
 ---
 
