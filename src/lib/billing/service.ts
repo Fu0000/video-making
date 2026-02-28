@@ -289,9 +289,10 @@ function resolveTaskActual(
   options?: {
     result?: Record<string, unknown> | void
     textUsage?: TextUsageEntry[]
+    customPricing?: ModelCustomPricing | null
   },
 ): ResolvedActual {
-  const textResolved = resolveTextCostFromUsage(options?.textUsage || [])
+  const textResolved = resolveTextCostFromUsage(options?.textUsage || [], options?.customPricing)
   if (info.apiType === 'text' && textResolved) {
     if (textResolved.actualQuantity > 0) {
       return textResolved
@@ -920,7 +921,7 @@ export async function settleTaskBilling(task: {
 
   let actual: ResolvedActual
   try {
-    actual = resolveTaskActual(info, quotedCost, options)
+    actual = resolveTaskActual(info, quotedCost, { ...options, customPricing })
   } catch (error) {
     if (mode === 'SHADOW' && error instanceof BillingOperationError && error.code === 'BILLING_UNKNOWN_MODEL') {
       return {
