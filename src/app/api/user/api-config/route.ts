@@ -611,7 +611,7 @@ function normalizeDefaultModelsInput(rawDefaultModels: unknown): DefaultModelsPa
   return normalized
 }
 
-function validateDefaultModelPricing(defaultModels: DefaultModelsPayload) {
+function validateDefaultModelPricing(defaultModels: DefaultModelsPayload, models?: StoredModel[]) {
   for (const field of DEFAULT_MODEL_FIELDS) {
     const modelKey = defaultModels[field]
     if (!modelKey) continue
@@ -619,6 +619,12 @@ function validateDefaultModelPricing(defaultModels: DefaultModelsPayload) {
     const parsed = parseModelKeyStrict(modelKey)
     if (!parsed) continue
     const apiType = DEFAULT_FIELD_TO_PRICING_API_TYPE[field]
+
+    // Skip if user provided custom pricing for this model (consistent with validateBillableModelPricing)
+    if (models) {
+      const matchedModel = models.find((m) => m.modelKey === parsed.modelKey)
+      if (matchedModel && hasCustomPricingForType(matchedModel)) continue
+    }
 
     if (!hasBuiltinPricingForModel(apiType, parsed.provider, parsed.modelId)) {
       throw new ApiError('INVALID_PARAMS', {
@@ -1019,7 +1025,8 @@ export const PUT = apiHandler(async (request: NextRequest) => {
 
   if (normalizedDefaults !== undefined) {
     if (billingMode !== 'OFF') {
-      validateDefaultModelPricing(normalizedDefaults)
+      const modelsForValidation = normalizedModels ?? existingModels
+      validateDefaultModelPricing(normalizedDefaults, modelsForValidation)
     }
     if (normalizedDefaults.analysisModel !== undefined) {
       updateData.analysisModel = normalizedDefaults.analysisModel || null
