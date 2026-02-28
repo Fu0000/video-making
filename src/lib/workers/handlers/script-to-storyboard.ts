@@ -1,6 +1,6 @@
 import type { Job } from 'bullmq'
 import { prisma } from '@/lib/prisma'
-import { chatCompletion, getCompletionParts } from '@/lib/llm-client'
+import { executeAiTextStep } from '@/lib/ai-runtime'
 import { resolveProjectModelCapabilityGenerationOptions } from '@/lib/config-service'
 import { withInternalLLMStreamCallbacks } from '@/lib/llm-observe/internal-stream-context'
 import { logAIAnalysis } from '@/lib/logging/semantic'
@@ -9,11 +9,13 @@ import { buildCharactersIntroduction } from '@/lib/constants'
 import { TaskTerminatedError } from '@/lib/task/errors'
 import { reportTaskProgress } from '@/lib/workers/shared'
 import { assertTaskActive } from '@/lib/workers/utils'
+import { executePipelineGraph, type GraphExecutorState } from '@/lib/run-runtime/graph-executor'
 import {
   runScriptToStoryboardOrchestrator,
   JsonParseError,
   type ScriptToStoryboardStepMeta,
   type ScriptToStoryboardStepOutput,
+  type ScriptToStoryboardOrchestratorResult,
 } from '@/lib/novel-promotion/script-to-storyboard/orchestrator'
 import { createWorkerLLMStreamCallbacks, createWorkerLLMStreamContext } from './llm-stream'
 import type { TaskJobData } from '@/lib/task/types'
@@ -28,8 +30,10 @@ import {
   type JsonRecord,
 } from './script-to-storyboard-helpers'
 import { buildPrompt, getPromptTemplate, PROMPT_IDS } from '@/lib/prompt-i18n'
+import { resolveAnalysisModel } from './resolve-analysis-model'
 
 type AnyObj = Record<string, unknown>
+const MAX_VOICE_ANALYZE_ATTEMPTS = 2
 
 function isReasoningEffort(value: unknown): value is 'minimal' | 'low' | 'medium' | 'high' {
   return value === 'minimal' || value === 'low' || value === 'medium' || value === 'high'
@@ -92,10 +96,11 @@ export async function handleScriptToStoryboardTask(job: Job<TaskJobData>) {
     throw new Error('No clips found')
   }
 
-  const model = inputModel || novelData.analysisModel || ''
-  if (!model) {
-    throw new Error('analysisModel is not configured')
-  }
+  const model = await resolveAnalysisModel({
+    userId: job.data.userId,
+    inputModel,
+    projectAnalysisModel: novelData.analysisModel,
+  })
   const llmCapabilityOptions = await resolveProjectModelCapabilityGenerationOptions({
     projectId,
     userId: job.data.userId,
@@ -128,7 +133,7 @@ export async function handleScriptToStoryboardTask(job: Job<TaskJobData>) {
   ): Promise<ScriptToStoryboardStepOutput> => {
     void _maxOutputTokens
     await assertTaskActive(job, `script_to_storyboard_step:${meta.stepId}`)
-    const progress = 15 + Math.min(55, Math.floor((meta.stepIndex / Math.max(1, meta.stepTotal)) * 55))
+    const progress = 15 + Math.min(70, Math.floor((meta.stepIndex / Math.max(1, meta.stepTotal)) * 70))
     await reportTaskProgress(job, progress, {
       stage: 'script_to_storyboard_step',
       stageLabel: 'progress.stage.scriptToStoryboardStep',
@@ -148,24 +153,17 @@ export async function handleScriptToStoryboardTask(job: Job<TaskJobData>) {
       model,
     })
 
-    const completion = await chatCompletion(
-      job.data.userId,
+    const output = await executeAiTextStep({
+      userId: job.data.userId,
       model,
-      [{ role: 'user', content: prompt }],
-      {
-        temperature,
-        reasoning,
-        reasoningEffort,
-        projectId,
-        action,
-        streamStepId: meta.stepId,
-        streamStepAttempt: meta.stepAttempt || 1,
-        streamStepTitle: meta.stepTitle,
-        streamStepIndex: meta.stepIndex,
-        streamStepTotal: meta.stepTotal,
-      },
-    )
-    const parts = getCompletionParts(completion)
+      messages: [{ role: 'user', content: prompt }],
+      projectId,
+      action,
+      meta,
+      temperature,
+      reasoning,
+      reasoningEffort,
+    })
 
     // Log AI response output (full raw text included for JSON parse debugging)
     logAIAnalysis(job.data.userId, 'worker', projectId, project.name, {
@@ -173,48 +171,89 @@ export async function handleScriptToStoryboardTask(job: Job<TaskJobData>) {
       output: {
         stepId: meta.stepId,
         stepTitle: meta.stepTitle,
-        rawText: parts.text,
-        textLength: parts.text.length,
-        reasoningLength: parts.reasoning.length,
+        rawText: output.text,
+        textLength: output.text.length,
+        reasoningLength: output.reasoning.length,
       },
       model,
     })
 
     return {
-      text: parts.text,
-      reasoning: parts.reasoning,
+      text: output.text,
+      reasoning: output.reasoning,
     }
   }
 
-  const orchestratorResult = await (async () => {
+  const payloadMeta = typeof payload.meta === 'object' && payload.meta !== null
+    ? (payload.meta as AnyObj)
+    : {}
+  const runId = typeof payload.runId === 'string' && payload.runId.trim()
+    ? payload.runId.trim()
+    : (typeof payloadMeta.runId === 'string' ? payloadMeta.runId.trim() : '')
+  if (!runId) {
+    throw new Error('runId is required for script_to_storyboard pipeline')
+  }
+
+  type ScriptToStoryboardGraphState = GraphExecutorState & {
+    orchestratorResult: ScriptToStoryboardOrchestratorResult | null
+  }
+  const initialState: ScriptToStoryboardGraphState = {
+    refs: {},
+    meta: {},
+    orchestratorResult: null,
+  }
+
+  const pipelineState = await (async () => {
     try {
       return await withInternalLLMStreamCallbacks(
         callbacks,
         async () =>
-          await runScriptToStoryboardOrchestrator({
-            clips: clips.map((clip) => ({
-              id: clip.id,
-              content: clip.content,
-              characters: clip.characters,
-              location: clip.location,
-              screenplay: clip.screenplay,
-            })),
-            novelPromotionData: {
-              characters: novelData.characters || [],
-              locations: novelData.locations || [],
-            },
-            promptTemplates: {
-              phase1PlanTemplate,
-              phase2CinematographyTemplate,
-              phase2ActingTemplate,
-              phase3DetailTemplate,
-            },
-            runStep,
+          await executePipelineGraph({
+            runId,
+            projectId,
+            userId: job.data.userId,
+            state: initialState,
+            nodes: [
+              {
+                key: 'script_to_storyboard_orchestrator',
+                title: 'script_to_storyboard_orchestrator',
+                maxAttempts: 2,
+                timeoutMs: 1000 * 60 * 20,
+                run: async (context) => {
+                  const nextResult = await runScriptToStoryboardOrchestrator({
+                    clips: clips.map((clip) => ({
+                      id: clip.id,
+                      content: clip.content,
+                      characters: clip.characters,
+                      location: clip.location,
+                      screenplay: clip.screenplay,
+                    })),
+                    novelPromotionData: {
+                      characters: novelData.characters || [],
+                      locations: novelData.locations || [],
+                    },
+                    promptTemplates: {
+                      phase1PlanTemplate,
+                      phase2CinematographyTemplate,
+                      phase2ActingTemplate,
+                      phase3DetailTemplate,
+                    },
+                    runStep,
+                  })
+
+                  context.state.orchestratorResult = nextResult
+                  return {
+                    output: {
+                      clipCount: nextResult.summary.clipCount,
+                      totalPanelCount: nextResult.summary.totalPanelCount,
+                    },
+                  }
+                },
+              },
+            ],
           }),
       )
     } catch (err) {
-      // If a JSON parse error bubbles out (after all retries), log the raw AI
-      // response so the log file shows exactly what the model returned.
       if (err instanceof JsonParseError) {
         logAIAnalysis(job.data.userId, 'worker', projectId, project.name, {
           action: 'SCRIPT_TO_STORYBOARD_PARSE_ERROR',
@@ -231,6 +270,11 @@ export async function handleScriptToStoryboardTask(job: Job<TaskJobData>) {
       await callbacks.flush()
     }
   })()
+
+  const orchestratorResult = pipelineState.orchestratorResult
+  if (!orchestratorResult) {
+    throw new Error('script_to_storyboard orchestrator produced no result')
+  }
 
   await reportTaskProgress(job, 80, {
     stage: 'script_to_storyboard_persist',
@@ -269,24 +313,41 @@ export async function handleScriptToStoryboardTask(job: Job<TaskJobData>) {
     stepIndex: orchestratorResult.summary.totalStepCount,
     stepTotal: orchestratorResult.summary.totalStepCount,
   }
-  for (let voiceAttempt = 1; voiceAttempt <= 2; voiceAttempt++) {
-    const meta = voiceAttempt === 1
-      ? voiceStepMeta
-      : {
+  try {
+    for (let voiceAttempt = 1; voiceAttempt <= MAX_VOICE_ANALYZE_ATTEMPTS; voiceAttempt++) {
+      const meta: ScriptToStoryboardStepMeta = {
         ...voiceStepMeta,
-        stepId: `voice_analyze_r${voiceAttempt}`,
-        stepTitle: voiceStepMeta.stepTitle,
+        stepAttempt: voiceAttempt,
       }
-    try {
-      const voiceOutput = await runStep(meta, voicePrompt, 'voice_analyze', 2600)
-      voiceLineRows = parseVoiceLinesJson(voiceOutput.text)
-      break
-    } catch (error) {
-      if (error instanceof TaskTerminatedError) {
-        throw error
+      try {
+        const voiceOutput = await withInternalLLMStreamCallbacks(
+          callbacks,
+          async () => await runStep(meta, voicePrompt, 'voice_analyze', 2600),
+        )
+        voiceLineRows = parseVoiceLinesJson(voiceOutput.text)
+        break
+      } catch (error) {
+        if (error instanceof TaskTerminatedError) {
+          throw error
+        }
+        voiceLastError = error instanceof Error ? error : new Error(String(error))
+        if (voiceAttempt < MAX_VOICE_ANALYZE_ATTEMPTS) {
+          await reportTaskProgress(job, 84, {
+            stage: 'script_to_storyboard_step',
+            stageLabel: 'progress.stage.scriptToStoryboardStep',
+            displayMode: 'detail',
+            message: `台词分析失败，准备重试 (${voiceAttempt + 1}/${MAX_VOICE_ANALYZE_ATTEMPTS})`,
+            stepId: voiceStepMeta.stepId,
+            stepAttempt: voiceAttempt + 1,
+            stepTitle: voiceStepMeta.stepTitle,
+            stepIndex: voiceStepMeta.stepIndex,
+            stepTotal: voiceStepMeta.stepTotal,
+          })
+        }
       }
-      voiceLastError = error instanceof Error ? error : new Error(String(error))
     }
+  } finally {
+    await callbacks.flush()
   }
   if (!voiceLineRows) {
     throw voiceLastError!

@@ -17,6 +17,9 @@ const reportTaskProgressMock = vi.hoisted(() => vi.fn(async () => undefined))
 const assertTaskActiveMock = vi.hoisted(() => vi.fn(async () => undefined))
 const chatCompletionMock = vi.hoisted(() => vi.fn(async () => ({ responseId: 'resp-1' })))
 const getCompletionPartsMock = vi.hoisted(() => vi.fn(() => ({ text: 'voice lines json', reasoning: '' })))
+const withInternalLLMStreamCallbacksMock = vi.hoisted(() =>
+  vi.fn(async (_callbacks: unknown, fn: () => Promise<unknown>) => await fn()),
+)
 const resolveProjectModelCapabilityGenerationOptionsMock = vi.hoisted(() =>
   vi.fn(async () => ({ reasoningEffort: 'high' })),
 )
@@ -44,6 +47,27 @@ const runScriptToStoryboardOrchestratorMock = vi.hoisted(() =>
     },
   })),
 )
+const graphExecutorMock = vi.hoisted(() => ({
+  executePipelineGraph: vi.fn(async (input: {
+    runId: string
+    projectId: string
+    userId: string
+    state: Record<string, unknown>
+    nodes: Array<{ key: string; run: (ctx: Record<string, unknown>) => Promise<unknown> }>
+  }) => {
+    for (const node of input.nodes) {
+      await node.run({
+        runId: input.runId,
+        projectId: input.projectId,
+        userId: input.userId,
+        nodeKey: node.key,
+        attempt: 1,
+        state: input.state,
+      })
+    }
+    return input.state
+  }),
+}))
 
 const parseVoiceLinesJsonMock = vi.hoisted(() => vi.fn())
 const persistStoryboardsAndPanelsMock = vi.hoisted(() => vi.fn())
@@ -70,6 +94,7 @@ vi.mock('@/lib/prisma', () => ({ prisma: prismaMock }))
 vi.mock('@/lib/llm-client', () => ({
   chatCompletion: chatCompletionMock,
   getCompletionParts: getCompletionPartsMock,
+  getCompletionContent: vi.fn(() => 'voice lines json'),
 }))
 
 vi.mock('@/lib/config-service', () => ({
@@ -77,7 +102,7 @@ vi.mock('@/lib/config-service', () => ({
 }))
 
 vi.mock('@/lib/llm-observe/internal-stream-context', () => ({
-  withInternalLLMStreamCallbacks: vi.fn(async (_callbacks: unknown, fn: () => Promise<unknown>) => await fn()),
+  withInternalLLMStreamCallbacks: withInternalLLMStreamCallbacksMock,
 }))
 
 vi.mock('@/lib/logging/semantic', () => ({
@@ -111,6 +136,9 @@ vi.mock('@/lib/novel-promotion/script-to-storyboard/orchestrator', () => ({
       this.rawText = rawText
     }
   },
+}))
+vi.mock('@/lib/run-runtime/graph-executor', () => ({
+  executePipelineGraph: graphExecutorMock.executePipelineGraph,
 }))
 
 vi.mock('@/lib/workers/handlers/llm-stream', () => ({
@@ -156,6 +184,18 @@ vi.mock('@/lib/workers/handlers/script-to-storyboard-helpers', () => ({
 import { handleScriptToStoryboardTask } from '@/lib/workers/handlers/script-to-storyboard'
 
 function buildJob(payload: Record<string, unknown>, episodeId: string | null = 'episode-1'): Job<TaskJobData> {
+  const runId = typeof payload.runId === 'string' && payload.runId.trim() ? payload.runId.trim() : 'run-test-storyboard'
+  const payloadMeta = payload.meta && typeof payload.meta === 'object' && !Array.isArray(payload.meta)
+    ? (payload.meta as Record<string, unknown>)
+    : {}
+  const normalizedPayload: Record<string, unknown> = {
+    ...payload,
+    runId,
+    meta: {
+      ...payloadMeta,
+      runId,
+    },
+  }
   return {
     data: {
       taskId: 'task-1',
@@ -165,7 +205,7 @@ function buildJob(payload: Record<string, unknown>, episodeId: string | null = '
       episodeId,
       targetType: 'NovelPromotionEpisode',
       targetId: 'episode-1',
-      payload,
+      payload: normalizedPayload,
       userId: 'user-1',
     },
   } as unknown as Job<TaskJobData>
@@ -293,5 +333,26 @@ describe('worker script-to-storyboard behavior', () => {
     }))
     expect(chatCompletionMock).toHaveBeenCalledTimes(2)
     expect(parseVoiceLinesJsonMock).toHaveBeenCalledTimes(2)
+    expect(withInternalLLMStreamCallbacksMock).toHaveBeenCalledTimes(3)
+    expect(chatCompletionMock.mock.calls[0]?.[3]).toEqual(expect.objectContaining({
+      action: 'voice_analyze',
+      streamStepId: 'voice_analyze',
+      streamStepAttempt: 1,
+    }))
+    expect(chatCompletionMock.mock.calls[1]?.[3]).toEqual(expect.objectContaining({
+      action: 'voice_analyze',
+      streamStepId: 'voice_analyze',
+      streamStepAttempt: 2,
+    }))
+    expect(reportTaskProgressMock).toHaveBeenCalledWith(
+      job,
+      84,
+      expect.objectContaining({
+        stage: 'script_to_storyboard_step',
+        stepId: 'voice_analyze',
+        stepAttempt: 2,
+        message: '台词分析失败，准备重试 (2/2)',
+      }),
+    )
   })
 })
