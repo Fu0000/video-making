@@ -181,17 +181,27 @@ function extractVideoUrlFromContent(content: string): string | null {
 
 /**
  * Fallback: POST /v1/chat/completions（Grok 等网关通过 chat 接口生成视频）
- * 响应 content 中包含视频 URL，同步返回
+ * 支持图生视频：将参考图通过 image_url content part 传入
  */
 async function createVideoViaChatFallback(
   baseUrl: string,
   apiKey: string,
   model: string,
   prompt: string,
+  imageUrl?: string,
 ): Promise<{ videoUrl: string }> {
   // baseUrl 可能是 "https://host" 或 "https://host/v1"，统一剥离末尾 /v1 再拼接
   const normalizedBase = baseUrl.replace(/\/+$/, '').replace(/\/v1$/i, '')
   const url = `${normalizedBase}/v1/chat/completions`
+
+  // 构造 multimodal 消息
+  type ContentPart = { type: 'text'; text: string } | { type: 'image_url'; image_url: { url: string } }
+  const contentParts: ContentPart[] = []
+  if (imageUrl) {
+    contentParts.push({ type: 'image_url', image_url: { url: imageUrl } })
+  }
+  contentParts.push({ type: 'text', text: prompt })
+
   const response = await fetch(url, {
     method: 'POST',
     headers: {
@@ -200,7 +210,7 @@ async function createVideoViaChatFallback(
     },
     body: JSON.stringify({
       model,
-      messages: [{ role: 'user', content: prompt }],
+      messages: [{ role: 'user', content: imageUrl ? contentParts : prompt }],
       stream: false,
     }),
   })
@@ -352,6 +362,7 @@ export class OpenAICompatibleVideoGenerator extends BaseVideoGenerator {
           config.apiKey,
           model,
           trimmedPrompt,
+          imageUrl || undefined,
         )
         syncVideoUrl = chatResult.videoUrl
       }
