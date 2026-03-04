@@ -38,3 +38,4 @@ Rules:
 2. Keep narrative and spatial continuity between previous and next panel.
 3. Use valid character and location names from provided context.
 4. JSON only, no markdown.
+5. ⚠️ video_prompt MUST be written in Chinese (中文), regardless of input language.

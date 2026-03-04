@@ -47,3 +47,4 @@ Rules:
 3. video_prompt should be motion-ready and concrete.
 4. Prefer age+gender wording in video_prompt when naming actors in camera directions.
 5. Return JSON array only.
+6. ⚠️ video_prompt MUST be written in Chinese (中文), regardless of input language.

@@ -15,6 +15,7 @@ Requirements:
 3. Write in concise English.
 4. Image prompt should focus on visual composition.
 5. Video prompt should focus on motion/performance/camera behavior.
+6. ⚠️ video_prompt MUST be written in Chinese (中文), regardless of input language.
 
 Output format:
 Return JSON only:

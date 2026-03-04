@@ -34,3 +34,4 @@ Execution rules:
 2. Preserve location continuity.
 3. Change framing/angle/composition according to target shot and camera move.
 4. Keep one-frame output only, no text overlays.
+5. ⚠️ video_prompt MUST be written in Chinese (中文), regardless of input language.
