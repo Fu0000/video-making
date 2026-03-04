@@ -189,7 +189,9 @@ async function createVideoViaChatFallback(
   model: string,
   prompt: string,
 ): Promise<{ videoUrl: string }> {
-  const url = `${baseUrl.replace(/\/+$/, '')}/v1/chat/completions`
+  // baseUrl 可能是 "https://host" 或 "https://host/v1"，统一剥离末尾 /v1 再拼接
+  const normalizedBase = baseUrl.replace(/\/+$/, '').replace(/\/v1$/i, '')
+  const url = `${normalizedBase}/v1/chat/completions`
   const response = await fetch(url, {
     method: 'POST',
     headers: {
