@@ -161,6 +161,74 @@ async function createVideoViaFetchFallback(
 }
 
 /**
+ * 从 chat/completions content 中提取视频 URL
+ * 支持：<source src="...">, <video src="...">, 直接 URL
+ */
+function extractVideoUrlFromContent(content: string): string | null {
+  // 优先：<source ... src="..."> 标签（Grok 网关实际返回格式）
+  const sourceMatch = content.match(/<source[^>]+src="([^"]+)"/i)
+  if (sourceMatch) return sourceMatch[1]
+  // <video ... src="..."> 标签
+  const videoSrcMatch = content.match(/<video[^>]+src="([^"]+)"/i)
+  if (videoSrcMatch) return videoSrcMatch[1]
+  // 直接视频 URL
+  if (/^https?:\/\/\S+\.(mp4|webm|mov)/i.test(content.trim())) return content.trim()
+  // 任意 https URL（兜底）
+  const urlMatch = content.match(/https?:\/\/[^\s"'<>]+/i)
+  if (urlMatch) return urlMatch[0]
+  return null
+}
+
+/**
+ * Fallback: POST /v1/chat/completions（Grok 等网关通过 chat 接口生成视频）
+ * 响应 content 中包含视频 URL，同步返回
+ */
+async function createVideoViaChatFallback(
+  baseUrl: string,
+  apiKey: string,
+  model: string,
+  prompt: string,
+): Promise<{ videoUrl: string }> {
+  const url = `${baseUrl.replace(/\/+$/, '')}/v1/chat/completions`
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({
+      model,
+      messages: [{ role: 'user', content: prompt }],
+      stream: false,
+    }),
+  })
+
+  if (!response.ok) {
+    const text = await response.text().catch(() => '')
+    throw new Error(`OPENAI_VIDEO_CHAT_FALLBACK_FAILED: ${response.status} ${text.slice(0, 200)}`)
+  }
+
+  const data = await response.json() as Record<string, unknown>
+  const choices = Array.isArray(data.choices) ? data.choices : []
+  const message = (choices[0] as Record<string, unknown> | undefined)?.message
+  const content = typeof (message as Record<string, unknown> | undefined)?.content === 'string'
+    ? ((message as Record<string, unknown>).content as string)
+    : ''
+
+  if (!content) {
+    throw new Error(`OPENAI_VIDEO_CHAT_FALLBACK_EMPTY: ${JSON.stringify(data).slice(0, 200)}`)
+  }
+
+  const videoUrl = extractVideoUrlFromContent(content)
+  if (!videoUrl) {
+    throw new Error(`OPENAI_VIDEO_CHAT_FALLBACK_URL_NOT_FOUND: content="${content.slice(0, 200)}"`)
+  }
+
+  return { videoUrl }
+}
+
+
+/**
  * 判断是否为端点不支持的错误（404/405/500 无 body 等）
  */
 function isEndpointUnsupportedError(error: unknown): boolean {
@@ -235,8 +303,9 @@ export class OpenAICompatibleVideoGenerator extends BaseVideoGenerator {
       inputReference = await toUploadFileFromImageUrl(imageUrl)
     }
 
-    // Strategy: try OpenAI SDK first (/v1/videos), fallback to /v1/video/create
-    let videoId: string
+    // Strategy: try OpenAI SDK first (/v1/videos), then /v1/video/create, finally /v1/chat/completions
+    let videoId: string | undefined
+    let syncVideoUrl: string | undefined
 
     try {
       const client = new OpenAI({
@@ -255,28 +324,51 @@ export class OpenAICompatibleVideoGenerator extends BaseVideoGenerator {
       }
       videoId = response.id
     } catch (sdkError) {
-      // If endpoint is not supported, fallback to /video/create
+      // If endpoint is not supported, try fallback to /video/create
       if (!isEndpointUnsupportedError(sdkError)) {
         throw sdkError
       }
 
-      const fallbackPayload: Record<string, unknown> = { ...requestPayload }
-      if (imageUrl) {
-        fallbackPayload.image_url = imageUrl
+      try {
+        const fallbackPayload: Record<string, unknown> = { ...requestPayload }
+        if (imageUrl) {
+          fallbackPayload.image_url = imageUrl
+        }
+        const fallbackResult = await createVideoViaFetchFallback(
+          config.baseUrl,
+          config.apiKey,
+          fallbackPayload,
+        )
+        videoId = fallbackResult.id
+      } catch (fallbackError) {
+        // If /video/create also fails, try chat/completions (Grok-style gateways)
+        if (!isEndpointUnsupportedError(fallbackError)) {
+          throw fallbackError
+        }
+        const chatResult = await createVideoViaChatFallback(
+          config.baseUrl,
+          config.apiKey,
+          model,
+          trimmedPrompt,
+        )
+        syncVideoUrl = chatResult.videoUrl
       }
-      const fallbackResult = await createVideoViaFetchFallback(
-        config.baseUrl,
-        config.apiKey,
-        fallbackPayload,
-      )
-      videoId = fallbackResult.id
+    }
+
+    // Sync path: video URL returned directly from chat/completions
+    if (syncVideoUrl) {
+      return {
+        success: true,
+        async: false,
+        videoUrl: syncVideoUrl,
+      }
     }
 
     const providerToken = encodeProviderId(config.id)
     return {
       success: true,
       async: true,
-      requestId: videoId,
+      requestId: videoId!,
       externalId: `OPENAI:VIDEO:${providerToken}:${videoId}`,
     }
   }
