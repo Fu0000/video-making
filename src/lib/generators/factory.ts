@@ -18,6 +18,7 @@ import {
 } from './image'
 import { GoogleVeoVideoGenerator } from './video/google'
 import { OpenAICompatibleVideoGenerator } from './video'
+import { GrokVideoGenerator } from './video/grok'
 import { QwenTTSGenerator } from './audio'
 import { MinimaxVideoGenerator } from './minimax'
 import { ViduVideoGenerator } from './vidu'
@@ -81,6 +82,8 @@ export function createVideoGenerator(provider: string): VideoGenerator {
             return new ViduVideoGenerator()
         case 'openai-compatible':
             return new OpenAICompatibleVideoGenerator(provider)
+        case 'grok':
+            return new GrokVideoGenerator(provider)
         default:
             throw new Error(`Unknown video generator provider: ${provider}`)
     }

@@ -12,8 +12,9 @@ WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 
-# Prisma generate + Next.js build
-RUN npm run build
+# Prisma generate + Next.js build（BuildKit cache mount 持久化 SWC 下载，网络中断可重试）
+RUN --mount=type=cache,target=/root/.cache \
+    npm run build
 
 # ==================== Stage 3: Production ====================
 FROM node:20-alpine AS runner

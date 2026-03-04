@@ -15,6 +15,23 @@
   },
   {
     "modelType": "video",
+    "provider": "grok",
+    "modelId": "grok-imagine-1.0-video",
+    "capabilities": {
+      "video": {
+        "generationModeOptions": [
+          "normal"
+        ],
+        "durationOptions": [
+          5
+        ],
+        "firstlastframe": false,
+        "supportGenerateAudio": false
+      }
+    }
+  },
+  {
+    "modelType": "video",
     "provider": "ark",
     "modelId": "doubao-seedance-1-0-pro-fast-251015",
     "capabilities": {

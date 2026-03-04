@@ -149,7 +149,7 @@ const DEFAULT_LIPSYNC_MODEL_KEY = composeModelKey('fal', 'fal-ai/kling-video/lip
 const PRICING_PROVIDER_ALIASES: Readonly<Record<string, string>> = {
   'gemini-compatible': 'google',
 }
-const OPTIONAL_PRICING_PROVIDER_KEYS = new Set(['openai-compatible', 'gemini-compatible'])
+const OPTIONAL_PRICING_PROVIDER_KEYS = new Set(['openai-compatible', 'gemini-compatible', 'grok'])
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value)
